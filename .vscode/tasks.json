@@ -1,0 +1,72 @@
+{
+    "tasks": [
+        {
+            "type": "cppbuild",
+            "label": "C/C++: g++.exe build active file",
+            "command": "C:\\msys64\\ucrt64\\bin\\\\g++.exe",
+            "args": [
+                "-fdiagnostics-color=always",
+                "-g",
+                
+                // ==========================================
+                // ARCHIVOS FUENTE PRINCIPALES
+                // ==========================================
+                "${file}",
+                
+                // ==========================================
+                // ARCHIVOS DE IMGUI (NÚCLEO)
+                // ==========================================
+                "imgui/imgui.cpp",
+                "imgui/imgui_draw.cpp",
+                "imgui/imgui_widgets.cpp",
+                "imgui/imgui_tables.cpp",
+                
+                // ==========================================
+                // BACKENDS DE IMGUI (GLFW + OPENGL)
+                // ==========================================
+                "imgui/backends/imgui_impl_glfw.cpp",
+                "imgui/backends/imgui_impl_opengl3.cpp",
+                
+                // ==========================================
+                // ARCHIVO DE SALIDA
+                // ==========================================
+                "-o",
+                "${fileDirname}\\${fileBasenameNoExtension}.exe",
+                
+                // ==========================================
+                // DIRECTORIOS DE INCLUDE (-I)
+                // ==========================================
+                "-I", "${fileDirname}/imgui",
+                "-I", "${fileDirname}/imgui/backends",
+                "-I", "${fileDirname}/glfw/include",
+                "-I", "${fileDirname}/npcap-sdk/include",
+                
+                // ==========================================
+                // DIRECTORIOS DE LIBRERÍAS (-L)
+                // ==========================================
+                "-L", "${fileDirname}/glfw/lib-mingw-w64",
+                "-L", "${fileDirname}/npcap-sdk/lib/x64",
+                
+                // ==========================================
+                // LIBRERÍAS A ENLAZAR (-l)
+                // ==========================================
+                "-lglfw3",           // GLFW
+                "-lopengl32",        // OpenGL
+                "-lgdi32",           // Necesario para GLFW en Windows
+                "-lwpcap",           // Npcap
+                "-lws2_32",          // Winsock
+                "-lIPHLPAPI"         // IP Helper API
+            ],
+            "options": {
+                "cwd": "${fileDirname}"
+            },
+            "problemMatcher": ["$gcc"],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "detail": "Sniffer con ImGui + GLFW + OpenGL + Npcap"
+        }
+    ],
+    "version": "2.0.0"
+}
