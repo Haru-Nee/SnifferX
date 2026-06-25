@@ -1,4 +1,23 @@
 NOTAS IMPORTANTES AL DESCARGAR EL REPOSTORIO:
+1. CASO 1: error al abrir la ventana
+  Es posible que muestre un error al termiar de compilar el programa. Para esto es necesario buscar las siguientes lineas de código:
+      glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+      glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+
+  y cambiarlas por lo siguiente:
+
+      glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+      glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+      glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+
+  además de la siguiente linea:
+      ImGui_ImplOpenGL3_Init("#version 130");
+
+  modificarla por: 
+
+      ImGui_ImplOpenGL3_Init("#version 330 core");
+
+2. CASO 2 (OBLIGATORIO)
 Es importante modificar el archivo ".tasks" y el archivo "properties.json"  que genera automáticamente al intentar compilar por primera vez el código si se utiliza visual studio como IDE para compilar el proyecto.
 
 //en el archivo tasks PONER ATENCION A LA SIGUIENTE LINEA, deberá ser cambiada por la ruta donde esté el compilador del usuario. La ruta msotrada es un ejemplo real
