@@ -1371,8 +1371,8 @@ int main() {
     }
     
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+    glfwWindowHint(GLFW_MAXIMIZED, GLFW_TRUE);
     
     GLFWwindow* ventana = glfwCreateWindow(1280, 720, "Sniffer - Analizador de Paquetes con Capas OSI", NULL, NULL);
     if (!ventana) {
@@ -1393,7 +1393,7 @@ int main() {
     ImGui::StyleColorsDark();
     
     ImGui_ImplGlfw_InitForOpenGL(ventana, true);
-    ImGui_ImplOpenGL3_Init("#version 330 core");
+    ImGui_ImplOpenGL3_Init("#version 130");
     
     paquetes_filtrados = paquetes;
     
