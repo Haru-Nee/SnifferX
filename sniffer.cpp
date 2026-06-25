@@ -8,6 +8,9 @@
 #include <sstream>
 #include <algorithm>
 #include <iomanip>
+#include <map>
+#include <chrono>
+#include <cmath>
 #include <pcap.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -25,8 +28,6 @@ using namespace std;
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "iphlpapi.lib")
-
-using namespace std;
 
 // ESTRUCTURAS
 
@@ -127,6 +128,41 @@ struct PaqueteDetallado {
     int longitud_raw;
 };
 
+// Estadísticas de protocolos
+struct EstadisticasProtocolo {
+    int tcp = 0;
+    int udp = 0;
+    int icmp = 0;
+    int otros = 0;
+    int total = 0;
+};
+
+// Estadísticas por capas OSI
+struct EstadisticasOSI {
+    // Capa 2 - Enlace de datos
+    int tramas_ethernet = 0;
+    int tramas_arp = 0;
+    
+    // Capa 3 - Red
+    int paquetes_ipv4 = 0;
+    int paquetes_ipv6 = 0;
+    int paquetes_icmp = 0;
+    
+    // Capa 4 - Transporte
+    int segmentos_tcp = 0;
+    int datagramas_udp = 0;
+    
+    // Capa 7 - Aplicación (puertos comunes)
+    int http_https = 0;    // 80, 443, 8080, 8443
+    int dns = 0;           // 53
+    int ssh = 0;           // 22
+    int ftp = 0;           // 20, 21
+    int smtp = 0;          // 25, 587, 465
+    int otros_puertos = 0;
+    
+    int total_paquetes = 0;
+};
+
 // VARIABLES GLOBALES
 
 vector<PaqueteInfo> paquetes;
@@ -150,6 +186,192 @@ PaqueteDetallado paquete_seleccionado;
 bool paquete_seleccionado_valido = false;
 int indice_seleccionado = -1;
 
+bool auto_scroll_activo = true;
+
+// Variables para estadísticas
+EstadisticasProtocolo stats;
+mutex mutexStats;
+
+EstadisticasOSI stats_osi;
+mutex mutexStatsOSI;
+
+// ====================================================
+// FUNCIONES DE ESTADÍSTICAS
+// ====================================================
+
+void actualizarEstadisticas(const string& protocolo, int puerto_origen, int puerto_destino, 
+                            unsigned short ethertype, unsigned char version_ip) {
+    lock_guard<mutex> lock(mutexStats);
+    stats.total++;
+    if (protocolo == "TCP") stats.tcp++;
+    else if (protocolo == "UDP") stats.udp++;
+    else if (protocolo == "ICMP") stats.icmp++;
+    else stats.otros++;
+    
+    // Actualizar estadísticas OSI
+    lock_guard<mutex> lockOSI(mutexStatsOSI);
+    stats_osi.total_paquetes++;
+    
+    // Capa 2 - Enlace
+    if (ethertype == 0x0800 || ethertype == 0x86DD) {
+        stats_osi.tramas_ethernet++;
+    } else if (ethertype == 0x0806) {
+        stats_osi.tramas_arp++;
+    }
+    
+    // Capa 3 - Red
+    if (version_ip == 4) {
+        stats_osi.paquetes_ipv4++;
+    } else if (version_ip == 6) {
+        stats_osi.paquetes_ipv6++;
+    }
+    if (protocolo == "ICMP") {
+        stats_osi.paquetes_icmp++;
+    }
+    
+    // Capa 4 - Transporte
+    if (protocolo == "TCP") {
+        stats_osi.segmentos_tcp++;
+    } else if (protocolo == "UDP") {
+        stats_osi.datagramas_udp++;
+    }
+    
+    // Capa 7 - Aplicación (basado en puertos)
+    int puerto = (puerto_origen > puerto_destino) ? puerto_destino : puerto_origen;
+    if (puerto == 80 || puerto == 443 || puerto == 8080 || puerto == 8443) {
+        stats_osi.http_https++;
+    } else if (puerto == 53) {
+        stats_osi.dns++;
+    } else if (puerto == 22) {
+        stats_osi.ssh++;
+    } else if (puerto == 20 || puerto == 21) {
+        stats_osi.ftp++;
+    } else if (puerto == 25 || puerto == 587 || puerto == 465) {
+        stats_osi.smtp++;
+    } else if (puerto > 0 && (protocolo == "TCP" || protocolo == "UDP")) {
+        stats_osi.otros_puertos++;
+    }
+}
+
+void dibujarBarraGrafico(const char* label, int valor, int total, ImVec4 color, float max_width) {
+    ImGui::Text("%s", label);
+    ImGui::SameLine(100);
+    
+    float porcentaje = (total > 0) ? (float)valor / total : 0.0f;
+    
+    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, color);
+    char overlay[64];
+    sprintf_s(overlay, "%d (%.1f%%)", valor, porcentaje * 100.0f);
+    ImGui::ProgressBar(porcentaje, ImVec2(max_width, 20), overlay);
+    ImGui::PopStyleColor();
+}
+
+void dibujarEstadisticasOSI() {
+    lock_guard<mutex> lock(mutexStatsOSI);
+    
+    if (stats_osi.total_paquetes == 0) {
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), 
+                         "Sin datos para mostrar.\nInicie la captura para ver estadisticas por capas OSI.");
+        return;
+    }
+    
+    ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.2f, 1.0f), "Total de paquetes analizados: %d", stats_osi.total_paquetes);
+    ImGui::Spacing();
+    
+    float max_width = ImGui::GetContentRegionAvail().x - 20;
+    
+    // ===== CAPA 2 - ENLACE DE DATOS =====
+    if (ImGui::CollapsingHeader("Capa 2 - Enlace de Datos", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Spacing();
+        
+        int total_capa2 = stats_osi.tramas_ethernet + stats_osi.tramas_arp;
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Total tramas Capa 2: %d", total_capa2);
+        ImGui::Spacing();
+        
+        dibujarBarraGrafico("Ethernet", stats_osi.tramas_ethernet, total_capa2, 
+                           ImVec4(0.2f, 0.6f, 1.0f, 1.0f), max_width - 40);
+        ImGui::Spacing();
+        
+        dibujarBarraGrafico("ARP", stats_osi.tramas_arp, total_capa2, 
+                           ImVec4(0.8f, 0.6f, 0.2f, 1.0f), max_width - 40);
+        ImGui::Spacing();
+    }
+    
+    // ===== CAPA 3 - RED =====
+    if (ImGui::CollapsingHeader("Capa 3 - Red", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Spacing();
+        
+        int total_capa3 = stats_osi.paquetes_ipv4 + stats_osi.paquetes_ipv6 + stats_osi.paquetes_icmp;
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Total paquetes Capa 3: %d", total_capa3);
+        ImGui::Spacing();
+        
+        dibujarBarraGrafico("IPv4", stats_osi.paquetes_ipv4, total_capa3, 
+                           ImVec4(0.2f, 0.8f, 0.2f, 1.0f), max_width - 40);
+        ImGui::Spacing();
+        
+        dibujarBarraGrafico("IPv6", stats_osi.paquetes_ipv6, total_capa3, 
+                           ImVec4(0.2f, 0.6f, 1.0f, 1.0f), max_width - 40);
+        ImGui::Spacing();
+        
+        dibujarBarraGrafico("ICMP", stats_osi.paquetes_icmp, total_capa3, 
+                           ImVec4(0.8f, 0.2f, 0.2f, 1.0f), max_width - 40);
+        ImGui::Spacing();
+    }
+    
+    // ===== CAPA 4 - TRANSPORTE =====
+    if (ImGui::CollapsingHeader("Capa 4 - Transporte", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Spacing();
+        
+        int total_capa4 = stats_osi.segmentos_tcp + stats_osi.datagramas_udp;
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Total segmentos Capa 4: %d", total_capa4);
+        ImGui::Spacing();
+        
+        dibujarBarraGrafico("TCP", stats_osi.segmentos_tcp, total_capa4, 
+                           ImVec4(0.2f, 0.8f, 0.2f, 1.0f), max_width - 40);
+        ImGui::Spacing();
+        
+        dibujarBarraGrafico("UDP", stats_osi.datagramas_udp, total_capa4, 
+                           ImVec4(0.8f, 0.8f, 0.2f, 1.0f), max_width - 40);
+        ImGui::Spacing();
+    }
+    
+    // ===== CAPA 7 - APLICACIÓN =====
+    if (ImGui::CollapsingHeader("Capa 7 - Aplicacion", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Spacing();
+        
+        int total_capa7 = stats_osi.http_https + stats_osi.dns + stats_osi.ssh + 
+                         stats_osi.ftp + stats_osi.smtp + stats_osi.otros_puertos;
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Total conexiones Capa 7: %d", total_capa7);
+        ImGui::Spacing();
+        
+        if (total_capa7 > 0) {
+            dibujarBarraGrafico("HTTP/HTTPS", stats_osi.http_https, total_capa7, 
+                               ImVec4(0.2f, 0.8f, 0.2f, 1.0f), max_width - 40);
+            ImGui::Spacing();
+            
+            dibujarBarraGrafico("DNS", stats_osi.dns, total_capa7, 
+                               ImVec4(0.2f, 0.6f, 1.0f, 1.0f), max_width - 40);
+            ImGui::Spacing();
+            
+            dibujarBarraGrafico("SSH", stats_osi.ssh, total_capa7, 
+                               ImVec4(0.8f, 0.6f, 0.2f, 1.0f), max_width - 40);
+            ImGui::Spacing();
+            
+            dibujarBarraGrafico("FTP", stats_osi.ftp, total_capa7, 
+                               ImVec4(0.8f, 0.4f, 0.2f, 1.0f), max_width - 40);
+            ImGui::Spacing();
+            
+            dibujarBarraGrafico("SMTP", stats_osi.smtp, total_capa7, 
+                               ImVec4(0.6f, 0.2f, 0.8f, 1.0f), max_width - 40);
+            ImGui::Spacing();
+            
+            dibujarBarraGrafico("Otros", stats_osi.otros_puertos, total_capa7, 
+                               ImVec4(0.5f, 0.5f, 0.5f, 1.0f), max_width - 40);
+        }
+        ImGui::Spacing();
+    }
+}
+
 // FUNCIONES DEL SNIFFER
 
 string obtenerHoraActual() {
@@ -163,9 +385,17 @@ string obtenerHoraActual() {
 string obtenerNombreProtocolo(unsigned char protocolo) {
     switch(protocolo) {
         case 1: return "ICMP";
+        case 2: return "IGMP";
         case 6: return "TCP";
         case 17: return "UDP";
-        default: return "Otro";
+        case 41: return "IPv6";
+        case 47: return "GRE";
+        case 50: return "ESP";
+        case 51: return "AH";
+        case 58: return "ICMPv6";
+        case 89: return "OSPF";
+        case 132: return "SCTP";
+        default: return "IP Proto " + to_string(protocolo);
     }
 }
 
@@ -228,6 +458,19 @@ bool cumpleFiltro(const PaqueteInfo& paquete, const string& filtro) {
     bool resultado = false;
     string operador = "or";
     
+    auto obtenerPuertos = [&](int& puerto_origen, int& puerto_destino) {
+        puerto_origen = -1;
+        puerto_destino = -1;
+        
+        for (const auto& detalle : paquetes_detallados) {
+            if (detalle.info_basica.numero == paquete.numero) {
+                puerto_origen = detalle.puerto_origen;
+                puerto_destino = detalle.puerto_destino;
+                break;
+            }
+        }
+    };
+    
     for (size_t i = 0; i < condiciones.size(); i++) {
         const string& cond = condiciones[i];
         
@@ -270,6 +513,76 @@ bool cumpleFiltro(const PaqueteInfo& paquete, const string& filtro) {
             string ip_buscada = cond.substr(6);
             cumple_condicion = (toLower(paquete.ip_origen).find(ip_buscada) != string::npos ||
                               toLower(paquete.ip_destino).find(ip_buscada) != string::npos);
+        }
+        else if (cond.find("tcp.srcport==") == 0) {
+            try {
+                int puerto_buscado = stoi(cond.substr(14));
+                int puerto_origen, puerto_destino;
+                obtenerPuertos(puerto_origen, puerto_destino);
+                cumple_condicion = (paquete.protocolo == "TCP" && puerto_origen == puerto_buscado);
+            } catch (...) {
+                cumple_condicion = false;
+            }
+        }
+        else if (cond.find("tcp.dstport==") == 0) {
+            try {
+                int puerto_buscado = stoi(cond.substr(14));
+                int puerto_origen, puerto_destino;
+                obtenerPuertos(puerto_origen, puerto_destino);
+                cumple_condicion = (paquete.protocolo == "TCP" && puerto_destino == puerto_buscado);
+            } catch (...) {
+                cumple_condicion = false;
+            }
+        }
+        else if (cond.find("udp.srcport==") == 0) {
+            try {
+                int puerto_buscado = stoi(cond.substr(14));
+                int puerto_origen, puerto_destino;
+                obtenerPuertos(puerto_origen, puerto_destino);
+                cumple_condicion = (paquete.protocolo == "UDP" && puerto_origen == puerto_buscado);
+            } catch (...) {
+                cumple_condicion = false;
+            }
+        }
+        else if (cond.find("udp.dstport==") == 0) {
+            try {
+                int puerto_buscado = stoi(cond.substr(14));
+                int puerto_origen, puerto_destino;
+                obtenerPuertos(puerto_origen, puerto_destino);
+                cumple_condicion = (paquete.protocolo == "UDP" && puerto_destino == puerto_buscado);
+            } catch (...) {
+                cumple_condicion = false;
+            }
+        }
+        else if (cond.find("srcport==") == 0) {
+            try {
+                int puerto_buscado = stoi(cond.substr(9));
+                int puerto_origen, puerto_destino;
+                obtenerPuertos(puerto_origen, puerto_destino);
+                cumple_condicion = (puerto_origen == puerto_buscado);
+            } catch (...) {
+                cumple_condicion = false;
+            }
+        }
+        else if (cond.find("dstport==") == 0) {
+            try {
+                int puerto_buscado = stoi(cond.substr(9));
+                int puerto_origen, puerto_destino;
+                obtenerPuertos(puerto_origen, puerto_destino);
+                cumple_condicion = (puerto_destino == puerto_buscado);
+            } catch (...) {
+                cumple_condicion = false;
+            }
+        }
+        else if (cond.find("port==") == 0) {
+            try {
+                int puerto_buscado = stoi(cond.substr(6));
+                int puerto_origen, puerto_destino;
+                obtenerPuertos(puerto_origen, puerto_destino);
+                cumple_condicion = (puerto_origen == puerto_buscado || puerto_destino == puerto_buscado);
+            } catch (...) {
+                cumple_condicion = false;
+            }
         }
         else if (cond.find("ttl==") == 0) {
             try {
@@ -329,21 +642,17 @@ void actualizarFiltro() {
 void procesarPaquete(u_char* parametro, const struct pcap_pkthdr* cabecera, const u_char* datos_paquete) {
     if (!capturando) return;
     
-    // Parsear Ethernet
     cabecera_ethernet* eth = (cabecera_ethernet*)datos_paquete;
     string mac_dst = macToString(eth->dst_mac);
     string mac_src = macToString(eth->src_mac);
     unsigned short ethertype = ntohs(eth->ethertype);
     
-    // Avanzar a IP (14 bytes de cabecera Ethernet estándar)
     const u_char* datos_ip = datos_paquete + 14;
     cabecera_ip* ip = (cabecera_ip*)datos_ip;
     
-    // Calcular offset a capa de transporte
     int ip_header_len = (ip->ihl) * 4;
     const u_char* datos_transporte = datos_ip + ip_header_len;
     
-    // Variables para capa de transporte
     int puerto_origen = 0;
     int puerto_destino = 0;
     string flags_tcp = "";
@@ -354,8 +663,7 @@ void procesarPaquete(u_char* parametro, const struct pcap_pkthdr* cabecera, cons
     unsigned char tipo_icmp = 0;
     unsigned char codigo_icmp = 0;
     
-    // Parsear según protocolo
-    if (ip->protocolo == 6) { // TCP
+    if (ip->protocolo == 6) {
         cabecera_tcp* tcp = (cabecera_tcp*)datos_transporte;
         puerto_origen = ntohs(tcp->puerto_origen);
         puerto_destino = ntohs(tcp->puerto_destino);
@@ -364,12 +672,12 @@ void procesarPaquete(u_char* parametro, const struct pcap_pkthdr* cabecera, cons
         ack_num = ntohl(tcp->numero_ack);
         ventana = ntohs(tcp->ventana);
         proto_detalle = "TCP";
-    } else if (ip->protocolo == 17) { // UDP
+    } else if (ip->protocolo == 17) {
         cabecera_udp* udp = (cabecera_udp*)datos_transporte;
         puerto_origen = ntohs(udp->puerto_origen);
         puerto_destino = ntohs(udp->puerto_destino);
         proto_detalle = "UDP";
-    } else if (ip->protocolo == 1) { // ICMP
+    } else if (ip->protocolo == 1) {
         cabecera_icmp* icmp = (cabecera_icmp*)datos_transporte;
         tipo_icmp = icmp->tipo;
         codigo_icmp = icmp->codigo;
@@ -378,14 +686,12 @@ void procesarPaquete(u_char* parametro, const struct pcap_pkthdr* cabecera, cons
         proto_detalle = "ICMP";
     }
     
-    // Datos RAW
     vector<unsigned char> raw_data(datos_paquete, datos_paquete + cabecera->len);
     
     in_addr origen, destino;
     origen.s_addr = ip->ip_origen;
     destino.s_addr = ip->ip_destino;
     
-    // Crear info básica
     PaqueteInfo info;
     info.numero = ++contador_paquetes;
     info.ip_origen = inet_ntoa(origen);
@@ -395,7 +701,9 @@ void procesarPaquete(u_char* parametro, const struct pcap_pkthdr* cabecera, cons
     info.protocolo = obtenerNombreProtocolo(ip->protocolo);
     info.hora = obtenerHoraActual();
     
-    // Crear paquete detallado
+    // Actualizar estadísticas con información OSI
+    actualizarEstadisticas(info.protocolo, puerto_origen, puerto_destino, ethertype, ip->version);
+    
     PaqueteDetallado detalle;
     detalle.info_basica = info;
     detalle.mac_origen = mac_src;
@@ -428,7 +736,6 @@ void procesarPaquete(u_char* parametro, const struct pcap_pkthdr* cabecera, cons
         paquetes_detallados.erase(paquetes_detallados.begin());
     }
     
-    // Actualizar filtro
     if (!filtro_actual.empty() && cumpleFiltro(info, filtro_actual)) {
         paquetes_filtrados.push_back(info);
     } else if (filtro_actual.empty()) {
@@ -531,6 +838,13 @@ void limpiarPaquetes() {
     contador_paquetes = 0;
     paquete_seleccionado_valido = false;
     indice_seleccionado = -1;
+    
+    // Limpiar estadísticas
+    lock_guard<mutex> lockStats(mutexStats);
+    stats = EstadisticasProtocolo();
+    
+    lock_guard<mutex> lockOSI(mutexStatsOSI);
+    stats_osi = EstadisticasOSI();
 }
 
 void exportarCSV(){
@@ -572,10 +886,6 @@ void exportarCSV(){
 // FUNCIONES DE LOS PANELES
 
 void dibujarPanelDetallePaquete() {
-    ImGui::TextColored(ImVec4(0.2f, 0.6f, 1.0f, 1.0f), "INFORMACION ESTRUCTURADA DEL PAQUETE");
-    ImGui::Separator();
-    ImGui::Spacing();
-    
     if (!paquete_seleccionado_valido) {
         ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Seleccione un paquete de la lista superior para ver sus detalles");
         return;
@@ -591,7 +901,6 @@ void dibujarPanelDetallePaquete() {
         ImGui::Text("Longitud total: %d bytes", paquete_seleccionado.longitud_raw);
         ImGui::TreePop();
     }
-    ImGui::Spacing();
     
     // Ethernet II
     if (ImGui::TreeNode("Ethernet II")) {
@@ -600,7 +909,6 @@ void dibujarPanelDetallePaquete() {
         ImGui::Text("Tipo:       %s", paquete_seleccionado.ethertype.c_str());
         ImGui::TreePop();
     }
-    ImGui::Spacing();
     
     // Internet Protocol Version 4
     if (ImGui::TreeNode("Internet Protocol Version 4")) {
@@ -622,7 +930,6 @@ void dibujarPanelDetallePaquete() {
         ImGui::Text("IP Destino: %s", paquete_seleccionado.info_basica.ip_destino.c_str());
         ImGui::TreePop();
     }
-    ImGui::Spacing();
     
     // Capa de transporte
     if (paquete_seleccionado.info_basica.protocolo == "TCP") {
@@ -651,10 +958,6 @@ void dibujarPanelDetallePaquete() {
 }
 
 void dibujarPanelDatosRaw() {
-    ImGui::TextColored(ImVec4(0.2f, 0.6f, 1.0f, 1.0f), "CONTENIDO RAW (HEXADECIMAL / ASCII)");
-    ImGui::Separator();
-    ImGui::Spacing();
-    
     if (!paquete_seleccionado_valido) {
         ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Seleccione un paquete de la lista superior para ver su contenido RAW");
         return;
@@ -671,12 +974,10 @@ void dibujarPanelDatosRaw() {
     char offset[16];
     
     for (size_t i = 0; i < datos.size(); i += bytes_por_linea) {
-        // Offset
         sprintf_s(offset, "%04X  ", (unsigned int)i);
         ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "%s", offset);
         ImGui::SameLine();
         
-        // Bytes en hexadecimal
         string hex_line;
         string ascii_line;
         
@@ -726,10 +1027,10 @@ void dibujarInterfaz(GLFWwindow* ventana) {
         ImGuiWindowFlags_NoScrollbar |
         ImGuiWindowFlags_NoScrollWithMouse);
     
-    ImVec2 tamano_texto = ImGui::CalcTextSize("Sniffer de Red - Analizador de Paquetes");
+    ImVec2 tamano_texto = ImGui::CalcTextSize("Sniffer de Red - Analizador de Paquetes con Capas OSI");
     ImGui::SetCursorPosX((ancho_ventana - tamano_texto.x) * 0.5f);
     ImGui::SetCursorPosY(15);
-    ImGui::TextColored(ImVec4(0.2f, 0.6f, 1.0f, 1.0f), "Sniffer de Red - Analizador de Paquetes");
+    ImGui::TextColored(ImVec4(0.2f, 0.6f, 1.0f, 1.0f), "Sniffer de Red - Analizador de Paquetes con Capas OSI");
     
     ImGui::End();
     
@@ -804,7 +1105,7 @@ void dibujarInterfaz(GLFWwindow* ventana) {
     ImGui::Text("Expresion de filtro:");
     ImGui::PushItemWidth(-1);
     
-    if (ImGui::InputTextWithHint("##filtro", "Ej: tcp and ip.src==192.168.1.1", 
+    if (ImGui::InputTextWithHint("##filtro", "Ej: tcp and port==80 or udp and dstport==53",
                                   buffer_filtro, sizeof(buffer_filtro),
                                   ImGuiInputTextFlags_EnterReturnsTrue)) {
         filtro_actual = buffer_filtro;
@@ -834,7 +1135,7 @@ void dibujarInterfaz(GLFWwindow* ventana) {
     ImGui::Separator();
     ImGui::Spacing();
     
-    // Estadísticas
+    // Estadísticas básicas en panel izquierdo
     ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.2f, 1.0f), "ESTADISTICAS");
     ImGui::Separator();
     ImGui::Spacing();
@@ -855,28 +1156,28 @@ void dibujarInterfaz(GLFWwindow* ventana) {
     
     // Indicador de estado
     if (capturando) {
-        ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), "● CAPTURANDO...");
+        ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), "CAPTURANDO...");
     } else {
-        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "○ DETENIDO");
+        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "DETENIDO");
     }
     
     if (filtro_activo) {
         ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.2f, 0.6f, 1.0f, 1.0f), "▼ FILTRO ACTIVO");
+        ImGui::TextColored(ImVec4(0.2f, 0.6f, 1.0f, 1.0f), "FILTRO ACTIVO");
         ImGui::TextWrapped("%s", filtro_actual.c_str());
     }
     
     ImGui::End();
     
     // =============================================
-    // PANEL DERECHO DIVIDIDO EN 3 AREAS
+    // PANEL DERECHO DIVIDIDO EN AREAS
     // =============================================
     
     float ancho_derecho = ancho_ventana - ancho_izquierdo;
     float alto_disponible = alto_ventana - alto_superior;
     
-    // AREA 1: Tabla de paquetes (parte superior)
-    float alto_area1 = alto_disponible * 0.45f;
+    // AREA 1: Tabla de paquetes
+    float alto_area1 = alto_disponible * 0.35f;
     ImGui::SetNextWindowPos(ImVec2(ancho_izquierdo, alto_superior));
     ImGui::SetNextWindowSize(ImVec2(ancho_derecho, alto_area1));
     ImGui::Begin("Area1_TablaPaquetes", nullptr, 
@@ -885,9 +1186,9 @@ void dibujarInterfaz(GLFWwindow* ventana) {
         ImGuiWindowFlags_NoMove);
     
     if (filtro_activo) {
-        ImGui::TextColored(ImVec4(0.2f, 0.6f, 1.0f, 1.0f), "AREA 1: PAQUETES FILTRADOS");
+        ImGui::TextColored(ImVec4(0.2f, 0.6f, 1.0f, 1.0f), "PAQUETES FILTRADOS");
     } else {
-        ImGui::TextColored(ImVec4(0.2f, 0.6f, 1.0f, 1.0f), "AREA 1: PAQUETES CAPTURADOS");
+        ImGui::TextColored(ImVec4(0.2f, 0.6f, 1.0f, 1.0f), "PAQUETES CAPTURADOS");
     }
     ImGui::SameLine();
     ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), " (Mostrando %d de %d)", 
@@ -896,10 +1197,12 @@ void dibujarInterfaz(GLFWwindow* ventana) {
     ImGui::Separator();
     ImGui::Spacing();
     
-    // Botón exportar
     if (ImGui::Button("EXPORTAR A CSV", ImVec2(150, 30))) {
         exportarCSV();
     }
+    ImGui::SameLine();
+    
+    ImGui::Checkbox("Auto-scroll", &auto_scroll_activo);
     ImGui::SameLine();
     
     if (filtro_activo) {
@@ -912,12 +1215,12 @@ void dibujarInterfaz(GLFWwindow* ventana) {
     
     float altura_tabla = ImGui::GetContentRegionAvail().y;
     
-    if (ImGui::BeginTable("Paquetes", 7, 
-        ImGuiTableFlags_Borders | 
-        ImGuiTableFlags_RowBg | 
-        ImGuiTableFlags_Resizable | 
-        ImGuiTableFlags_ScrollY, 
-        ImVec2(0, altura_tabla))) {
+    ImGuiTableFlags tabla_flags = ImGuiTableFlags_Borders | 
+                                   ImGuiTableFlags_RowBg | 
+                                   ImGuiTableFlags_Resizable | 
+                                   ImGuiTableFlags_ScrollY;
+    
+    if (ImGui::BeginTable("Paquetes", 7, tabla_flags, ImVec2(0, altura_tabla))) {
         
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 40.0f);
@@ -934,7 +1237,6 @@ void dibujarInterfaz(GLFWwindow* ventana) {
         for (const auto& pkt : paquetes_filtrados) {
             ImGui::TableNextRow();
             
-            // Columna 0: Número (seleccionable)
             ImGui::TableSetColumnIndex(0);
             char label[32];
             sprintf_s(label, "%d", pkt.numero);
@@ -942,6 +1244,7 @@ void dibujarInterfaz(GLFWwindow* ventana) {
             if (ImGui::Selectable(label, indice_seleccionado == pkt.numero, 
                                  ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick)) {
                 indice_seleccionado = pkt.numero;
+                auto_scroll_activo = false;
                 for (const auto& detalle : paquetes_detallados) {
                     if (detalle.info_basica.numero == pkt.numero) {
                         paquete_seleccionado = detalle;
@@ -978,37 +1281,72 @@ void dibujarInterfaz(GLFWwindow* ventana) {
             ImGui::Text("%d", pkt.largo);
         }
         
+        if (auto_scroll_activo && paquetes_filtrados.size() > 0) {
+            ImGui::SetScrollHereY(1.0f);
+        }
+        
         ImGui::EndTable();
     }
     
     ImGui::End();
     
-    // AREA 2: Información estructurada del paquete seleccionado (parte media)
-    float alto_area2 = alto_disponible * 0.27f;
+    // AREA 2: Detalle del paquete y Datos RAW (dividido en 2 columnas)
+    float alto_area2 = alto_disponible * 0.30f;
     ImGui::SetNextWindowPos(ImVec2(ancho_izquierdo, alto_superior + alto_area1));
     ImGui::SetNextWindowSize(ImVec2(ancho_derecho, alto_area2));
-    ImGui::Begin("Area2_DetallePaquete", nullptr, 
+    ImGui::Begin("Area2_DetalleYRaw", nullptr, 
         ImGuiWindowFlags_NoTitleBar | 
         ImGuiWindowFlags_NoResize | 
         ImGuiWindowFlags_NoMove);
     
+    // Dividir en dos columnas
+    ImGui::Columns(2, "detalle_raw_columns", false);
+    
+    // Columna izquierda: Detalle del paquete
+    ImGui::TextColored(ImVec4(0.2f, 0.6f, 1.0f, 1.0f), "INFORMACION ESTRUCTURADA DEL PAQUETE");
+    ImGui::Separator();
+    ImGui::Spacing();
     ImGui::BeginChild("ScrollDetalle", ImVec2(0, 0), true);
     dibujarPanelDetallePaquete();
     ImGui::EndChild();
     
-    ImGui::End();
+    ImGui::NextColumn();
     
-    // AREA 3: Contenido RAW en hexadecimal (parte inferior)
-    float alto_area3 = alto_disponible * 0.28f;
-    ImGui::SetNextWindowPos(ImVec2(ancho_izquierdo, alto_superior + alto_area1 + alto_area2));
-    ImGui::SetNextWindowSize(ImVec2(ancho_derecho, alto_area3));
-    ImGui::Begin("Area3_DatosRaw", nullptr, 
-        ImGuiWindowFlags_NoTitleBar | 
-        ImGuiWindowFlags_NoResize | 
-        ImGuiWindowFlags_NoMove);
-    
+    // Columna derecha: Datos RAW
+    ImGui::TextColored(ImVec4(0.2f, 0.6f, 1.0f, 1.0f), "CONTENIDO RAW (HEXADECIMAL / ASCII)");
+    ImGui::Separator();
+    ImGui::Spacing();
     dibujarPanelDatosRaw();
     
+    ImGui::Columns(1);
+    
+    ImGui::End();
+
+    // AREA 3: ESTADÍSTICAS POR CAPAS OSI
+    float alto_area3 = alto_disponible * 0.35f;
+    ImGui::SetNextWindowPos(ImVec2(ancho_izquierdo, alto_superior + alto_area1 + alto_area2));
+    ImGui::SetNextWindowSize(ImVec2(ancho_derecho, alto_area3));
+    ImGui::Begin("EstadisticasOSI", nullptr,
+        ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove);
+
+    ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.2f, 1.0f), "ANALISIS POR CAPAS OSI");
+    
+    ImGui::SameLine(ancho_derecho - 140);
+    if (ImGui::Button("REINICIAR STATS", ImVec2(130, 0))) {
+        lock_guard<mutex> lock(mutexStats);
+        stats = EstadisticasProtocolo();
+        lock_guard<mutex> lockOSI(mutexStatsOSI);
+        stats_osi = EstadisticasOSI();
+    }
+    
+    ImGui::Separator();
+    ImGui::Spacing();
+    
+    ImGui::BeginChild("ScrollOSI", ImVec2(0, 0), true);
+    dibujarEstadisticasOSI();
+    ImGui::EndChild();
+
     ImGui::End();
 }
 
@@ -1033,10 +1371,10 @@ int main() {
     }
     
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
-    glfwWindowHint(GLFW_MAXIMIZED, GLFW_TRUE);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     
-    GLFWwindow* ventana = glfwCreateWindow(1280, 720, "Sniffer", NULL, NULL);
+    GLFWwindow* ventana = glfwCreateWindow(1280, 720, "Sniffer - Analizador de Paquetes con Capas OSI", NULL, NULL);
     if (!ventana) {
         cerr << "Error al crear la ventana" << endl;
         glfwTerminate();
@@ -1055,7 +1393,7 @@ int main() {
     ImGui::StyleColorsDark();
     
     ImGui_ImplGlfw_InitForOpenGL(ventana, true);
-    ImGui_ImplOpenGL3_Init("#version 130");
+    ImGui_ImplOpenGL3_Init("#version 330 core");
     
     paquetes_filtrados = paquetes;
     
