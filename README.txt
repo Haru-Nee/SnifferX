@@ -79,6 +79,9 @@ LINEAS COMPLETAS:
     "version": "2.0.0"
 }
 
+//FIN DEL ARCHIVO TASKS
+
+
 //en el archivo properties
   "compilerPath": "C:\\msys64\\ucrt64\\bin\\gcc.exe" CAMBIAR ESTA RUTA POR LA DEL USUARIO
 
